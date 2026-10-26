@@ -9,6 +9,11 @@ import cairosvg
 from pypdf import PdfWriter
 
 
+def write_pdf(svg: str, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(cairosvg.svg2pdf(bytestring=svg.encode("utf-8")))
+
+
 def write_combined_pdf(svg_by_filename: dict[str, str], output_path: Path) -> None:
     writer = PdfWriter()
     for svg in svg_by_filename.values():

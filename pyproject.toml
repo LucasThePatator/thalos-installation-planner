@@ -1,10 +1,24 @@
 [project]
 name = "thalos-installation-planner"
 version = "0.1.0"
-description = "Add your description here"
+description = "Generates printable A4 installation/rangement charts for the Thalos Halloween event from a shared Google Sheet."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "cairosvg>=2.9.0",
     "pypdf>=6.14.2",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.8",
+    "pillow>=11",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

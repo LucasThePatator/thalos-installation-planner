@@ -54,7 +54,7 @@ def _hex_to_hls(hex_color: str) -> tuple[float, float, float]:
 
 def _hls_to_hex(h: float, lightness: float, s: float) -> str:
     r, g, b = colorsys.hls_to_rgb(h, lightness, s)
-    return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
 def _generate_shades(base_hex: str, count: int) -> list[str]:
@@ -82,11 +82,39 @@ def _text_width(text: str, font_size: float) -> float:
 
 
 def _fit_text(text: str, max_width_mm: float, font_size: float) -> str:
-    char_w = font_size * 0.56
+    char_w = font_size * 0.68  # both callers render bold titles, which are wider than plain text
     max_chars = max(3, int(max_width_mm / char_w))
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
+
+
+def _chip_width(label: str) -> float:
+    return 3.5 + _text_width(label, CHIP_FONT_SIZE) * 1.18  # bold object name renders wider than the estimate
+
+
+def _fit_chip_label(name: str, note: str | None, max_chip_w: float) -> tuple[str, str | None]:
+    """A chip can't wrap below its own width the way a box's text can reflow
+    across rows, so a single very long item name can push a chip wider than
+    the box itself — scale/pagination can't fix that. Shrink the displayed
+    name/note (dropping the note first, then truncating the name) so the
+    chip always fits within one row."""
+    if _chip_width(name + (f" · {note}" if note else "")) <= max_chip_w:
+        return name, note
+    if note and _chip_width(name) <= max_chip_w:
+        return name, None
+    # Binary search the longest name prefix (plus an ellipsis) whose chip fits.
+    lo, hi = 1, len(name)
+    best = name[:1]
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = name[:mid].rstrip() + "…"
+        if _chip_width(candidate) <= max_chip_w:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best, None
 
 
 def _layout_chips(items: list[dict], box_w: float, start_y: float, first_row_right_pad: float = 0.0) -> float:
@@ -97,10 +125,16 @@ def _layout_chips(items: list[dict], box_w: float, start_y: float, first_row_rig
     x = CHIP_PAD_X
     y = start_y
     row = 0
+    # The widest a chip could ever need to be and still open a fresh row —
+    # used as the hard cap for truncating any single item's displayed label.
+    max_chip_w = max(1.0, box_w - CHIP_PAD_X - CHIP_RIGHT_PAD)
     for item in items:
-        label = item["name"] + (f" · {item['note']}" if item.get("note") else "")
+        name, note = _fit_chip_label(item["name"], item.get("note"), max_chip_w)
+        item["_display_name"] = name
+        item["_display_note"] = note
+        label = name + (f" · {note}" if note else "")
         item["_label"] = label
-        chip_w = 3.5 + _text_width(label, CHIP_FONT_SIZE) * 1.18  # bold object name renders wider than the estimate
+        chip_w = _chip_width(label)
         right_pad = CHIP_RIGHT_PAD + (first_row_right_pad if row == 0 else 0.0)
         # On the badge row, even the first chip must wrap away if it doesn't
         # fit beside the badge (row 1+ has the full width, so it fits there).
@@ -134,7 +168,7 @@ def _layout_box(box: dict, box_w: float) -> None:
     last_bottom = y
     for sg in box["subgroups"]:
         sg["_y"] = y
-        sg["_badge_w"] = 4.2 + _text_width(sg["title"], BADGE_FONT_SIZE)
+        sg["_badge_w"] = 4.6 + _text_width(sg["title"], BADGE_FONT_SIZE) * 1.22  # bold badge text renders wider than the estimate
         content_bottom = _layout_chips(sg["items"], box_w, y, first_row_right_pad=sg["_badge_w"] + 3.0)
         sg["_bottom"] = content_bottom
         last_bottom = content_bottom
@@ -176,33 +210,126 @@ def _layout_columns(boxes: list[dict], col_w: float, n_cols: int) -> tuple[list[
     return columns, max_h
 
 
-def _render(boxes: list[dict], title: str, n_cols: int = 2) -> str:
-    avail_w = PAGE_W - 2 * MARGIN
-    avail_h = PAGE_H - 2 * MARGIN - TITLE_H
+def _solve_scale(boxes: list[dict], n_cols: int, avail_w: float, avail_h: float, max_scale: float) -> tuple[float, float]:
+    """Iteratively solve for scale and column width together so the columns
+    always fill the full page width — a wider column wraps fewer chip rows,
+    which in turn lets the scale grow back towards 1, rather than shrinking
+    width and height in lockstep and leaving empty margins on the sides.
 
-    # Solve for scale and column width together so the columns always fill
-    # the full page width — a wider column wraps fewer chip rows, which in
-    # turn lets the scale grow back towards 1, rather than shrinking width
-    # and height in lockstep and leaving empty margins on the sides.
+    Unlike the old version, the returned scale is NOT clamped to MIN_SCALE:
+    a value below MIN_SCALE means this content genuinely doesn't fit on one
+    page at a readable size, which callers use to decide whether to spill
+    onto another page instead of shrinking text past legibility."""
+    # Cap scale so col_w never needs to shrink past BOX_W_MIN to keep filling
+    # the width — past that floor, growing the scale further would instead
+    # push the box past the page's right edge.
+    min_total_w = n_cols * BOX_W_MIN + COL_GAP * (n_cols - 1)
+    max_scale = min(max_scale, avail_w / min_total_w) if min_total_w > 0 else max_scale
+
     scale = 1.0
     total_w = avail_w
     col_w = max(BOX_W_MIN, (total_w - COL_GAP * (n_cols - 1)) / n_cols)
     for _ in range(8):
         _, content_h = _layout_columns(boxes, col_w, n_cols)
-        new_scale = max(MIN_SCALE, min(MAX_SCALE, avail_h / content_h if content_h else MAX_SCALE))
+        new_scale = min(max_scale, avail_h / content_h) if content_h else max_scale
+        new_scale = max(new_scale, 1e-3)  # keep the iteration numerically stable; MIN_SCALE is checked by callers
         if abs(new_scale - scale) < 1e-3:
             scale = new_scale
             break
         scale = new_scale
         total_w = avail_w / scale
         col_w = max(BOX_W_MIN, (total_w - COL_GAP * (n_cols - 1)) / n_cols)
-    else:
-        _layout_columns(boxes, col_w, n_cols)
+
+    # The fixed-point search above can oscillate instead of converging —
+    # a column width change can flip how many rows a chip list wraps to,
+    # which is a discontinuous function of col_w, so the loop can exit on
+    # the iteration cap with a `scale` that doesn't actually match the
+    # `col_w` being returned. Rather than trust that pairing, independently
+    # cap scale by what height AND width actually require for this exact
+    # col_w — safe regardless of how col_w was derived, since both
+    # content_h * scale <= avail_h and content_w * scale <= avail_w end up
+    # guaranteed, instead of relying on the two to have converged together.
+    _, content_h = _layout_columns(boxes, col_w, n_cols)
+    content_w = n_cols * col_w + COL_GAP * (n_cols - 1)
+    scale_h = avail_h / content_h if content_h else max_scale
+    scale_w = avail_w / content_w if content_w else max_scale
+    scale = max(min(max_scale, scale_h, scale_w), 1e-3)
+
+    return scale, col_w
+
+
+def _split_box_by_subgroups(box: dict, n_cols: int, avail_w: float, avail_h: float, max_scale: float) -> list[dict]:
+    """A box that's too tall even alone (e.g. one category with far more
+    people/items than a page can hold at a readable scale) can't be helped
+    by box-level pagination, since there's only one of it — split its
+    subgroups into several same-titled boxes instead, each one sized to fit
+    alone, so later box-level pagination can place them across pages."""
+    subgroups = box["subgroups"]
+    if not subgroups:
+        return [box]
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    for sg in subgroups:
+        candidate = current + [sg]
+        probe = {"title": box["title"], "border_color": box["border_color"], "subgroups": candidate}
+        scale, _ = _solve_scale([probe], n_cols, avail_w, avail_h, max_scale)
+        if scale >= MIN_SCALE or not current:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = [sg]
+    chunks.append(current)
+    if len(chunks) == 1:
+        return [box]
+    total = len(chunks)
+    return [
+        {"title": f'{box["title"]} ({i}/{total})', "border_color": box["border_color"], "subgroups": chunk}
+        for i, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def _paginate_boxes(boxes: list[dict], n_cols: int, avail_w: float, avail_h: float, max_scale: float) -> list[list[dict]]:
+    """Greedily split boxes across pages so no single page needs to shrink
+    its content below MIN_SCALE to fit — once adding the next box would
+    force that, it starts a new page instead, so overflow becomes another
+    sheet of the same chart rather than unreadable text."""
+    if not boxes:
+        return [[]]
+    expanded: list[dict] = []
+    for box in boxes:
+        expanded.extend(_split_box_by_subgroups(box, n_cols, avail_w, avail_h, max_scale))
+    pages: list[list[dict]] = []
+    current: list[dict] = []
+    for box in expanded:
+        candidate = current + [box]
+        scale, _ = _solve_scale(candidate, n_cols, avail_w, avail_h, max_scale)
+        if scale >= MIN_SCALE or not current:
+            current = candidate
+        else:
+            pages.append(current)
+            current = [box]
+    pages.append(current)
+    return pages
+
+
+def _render_page(boxes: list[dict], title: str | None, n_cols: int, max_scale: float, box_chrome: bool, legend: str | None = None) -> str:
+    avail_w = PAGE_W - 2 * MARGIN
+    title_h = TITLE_H if title else 0.0
+    avail_h = PAGE_H - 2 * MARGIN - title_h
+
+    # No MIN_SCALE floor here: pagination (_paginate_boxes / _split_box_by_subgroups)
+    # is responsible for keeping every page's content above MIN_SCALE wherever a
+    # split is possible. The one case that can still land below it — a single
+    # subgroup too big to fit alone, forced onto its own page by the
+    # `or not current` fallback — must shrink further rather than be clamped and
+    # pushed off the page; staying inside the sheet takes priority over staying
+    # above the readability floor.
+    scale, col_w = _solve_scale(boxes, n_cols, avail_w, avail_h, max_scale)
 
     box_w = col_w
     content_w = n_cols * col_w + COL_GAP * (n_cols - 1)
     offset_x = MARGIN + max(0.0, (avail_w - content_w * scale) / 2)
-    offset_y = MARGIN + TITLE_H
+    offset_y = MARGIN + title_h
 
     parts: list[str] = []
     parts.append(
@@ -210,26 +337,41 @@ def _render(boxes: list[dict], title: str, n_cols: int = 2) -> str:
         f'viewBox="0 0 {PAGE_W} {PAGE_H}" font-family="system-ui, -apple-system, Segoe UI, sans-serif">'
     )
     parts.append(f'<rect x="0" y="0" width="{PAGE_W}" height="{PAGE_H}" fill="#fcfcfb"/>')
-    parts.append(f'<text x="{MARGIN}" y="{MARGIN + 5}" font-size="5.6" font-weight="700" fill="{INK}">{_esc(title)}</text>')
+    if title:
+        parts.append(f'<text x="{MARGIN}" y="{MARGIN + 5}" font-size="5.6" font-weight="700" fill="{INK}">{_esc(title)}</text>')
+        if legend:
+            # Clarifies what the box titles and subgroup badges below actually
+            # represent (e.g. "amené par" vs "provenance") — without it, two
+            # charts with the same box/badge shapes but different grouping
+            # keys are visually indistinguishable except for the main title.
+            parts.append(f'<text x="{MARGIN}" y="{MARGIN + 9.3}" font-size="3.0" fill="{NOTE_INK}">{_esc(legend)}</text>')
 
     parts.append(f'<g transform="translate({offset_x:.2f},{offset_y:.2f}) scale({scale:.4f})">')
 
     for box in boxes:
         x, y0, h = box["_x"], box["_y"], box["_h"]
-        parts.append(
-            f'<rect x="{x:.2f}" y="{y0:.2f}" width="{box_w:.2f}" height="{h:.2f}" rx="3.5" '
-            f'fill="{box["border_color"]}" fill-opacity="0.035" stroke="{box["border_color"]}" stroke-opacity="0.6" stroke-width="0.45"/>'
-        )
-        # Left accent bar identifies the box's own group (category or person) —
-        # visually distinct from the badges (subgroup) and dots (object) below.
-        parts.append(
-            f'<rect x="{x + 1.3:.2f}" y="{y0 + 1.3:.2f}" width="{BOX_BAR_W}" height="{h - 2.6:.2f}" rx="1.1" fill="{box["border_color"]}" fill-opacity="0.85"/>'
-        )
-        box_title = _fit_text(box["title"], box_w - 16, TITLE_FONT_SIZE)
-        parts.append(
-            f'<text x="{x + 6.5:.2f}" y="{y0 + HEADER_H / 2 + 1.1:.2f}" font-size="{TITLE_FONT_SIZE}" font-weight="700" fill="{INK}">{_esc(box_title)}</text>'
-        )
-        parts.append(f'<line x1="{x + 3:.2f}" x2="{x + box_w - 3:.2f}" y1="{y0 + HEADER_H:.2f}" y2="{y0 + HEADER_H:.2f}" stroke="{box["border_color"]}" stroke-opacity="0.25" stroke-width="0.3"/>')
+        if box_chrome:
+            parts.append(
+                f'<rect x="{x:.2f}" y="{y0:.2f}" width="{box_w:.2f}" height="{h:.2f}" rx="3.5" '
+                f'fill="{box["border_color"]}" fill-opacity="0.035" stroke="{box["border_color"]}" stroke-opacity="0.6" stroke-width="0.45"/>'
+            )
+            # Left accent bar identifies the box's own group (category or person) —
+            # visually distinct from the badges (subgroup) and dots (object) below.
+            parts.append(
+                f'<rect x="{x + 1.3:.2f}" y="{y0 + 1.3:.2f}" width="{BOX_BAR_W}" height="{h - 2.6:.2f}" rx="1.1" fill="{box["border_color"]}" fill-opacity="0.85"/>'
+            )
+            box_title = _fit_text(box["title"], box_w - 16, TITLE_FONT_SIZE)
+            parts.append(
+                f'<text x="{x + 6.5:.2f}" y="{y0 + HEADER_H / 2 + 1.1:.2f}" font-size="{TITLE_FONT_SIZE}" font-weight="700" fill="{INK}">{_esc(box_title)}</text>'
+            )
+            parts.append(f'<line x1="{x + 3:.2f}" x2="{x + box_w - 3:.2f}" y1="{y0 + HEADER_H:.2f}" y2="{y0 + HEADER_H:.2f}" stroke="{box["border_color"]}" stroke-opacity="0.25" stroke-width="0.3"/>')
+        else:
+            # No frame — the name is just a plain page heading, category
+            # clusters float directly on the page underneath it.
+            box_title = _fit_text(box["title"], box_w, TITLE_FONT_SIZE * 1.5)
+            parts.append(
+                f'<text x="{x:.2f}" y="{y0 + HEADER_H / 2 + 1.6:.2f}" font-size="{TITLE_FONT_SIZE * 1.5}" font-weight="700" fill="{INK}">{_esc(box_title)}</text>'
+            )
 
         for sg in box["subgroups"]:
             sy = y0 + sg["_y"]
@@ -254,10 +396,12 @@ def _render(boxes: list[dict], title: str, n_cols: int = 2) -> str:
             for item in sg["items"]:
                 lx, ly = x + item["_lx"], y0 + item["_ly"]
                 parts.append(f'<circle cx="{lx:.2f}" cy="{ly:.2f}" r="1.1" fill="{item["color"]}"/>')
-                note = f" · {item['note']}" if item.get("note") else ""
+                display_name = item.get("_display_name", item["name"])
+                display_note = item.get("_display_note", item.get("note"))
+                note = f" · {display_note}" if display_note else ""
                 parts.append(
                     f'<text x="{lx + 2.7:.2f}" y="{ly + 1.1:.2f}" font-size="{CHIP_FONT_SIZE}">'
-                    f'<tspan font-weight="600" fill="{OBJECT_INK}">{_esc(item["name"])}</tspan>'
+                    f'<tspan font-weight="600" fill="{OBJECT_INK}">{_esc(display_name)}</tspan>'
                     + (f'<tspan fill="{NOTE_INK}">{_esc(note)}</tspan>' if note else "")
                     + "</text>"
                 )
@@ -267,7 +411,29 @@ def _render(boxes: list[dict], title: str, n_cols: int = 2) -> str:
     return "\n".join(parts)
 
 
-def render_by_category(items: list[dict], category_colors: dict[str, str], title: str) -> str:
+def _render(boxes: list[dict], title: str | None, n_cols: int = 2, max_scale: float = MAX_SCALE, box_chrome: bool = True, legend: str | None = None) -> list[str]:
+    """Paginate boxes across as many A4 pages as needed and render each one.
+    Returns one SVG string per page; callers get a single page back in the
+    common case, more only when content would otherwise spill past MIN_SCALE."""
+    avail_w = PAGE_W - 2 * MARGIN
+    title_h = TITLE_H if title else 0.0
+    avail_h = PAGE_H - 2 * MARGIN - title_h
+
+    pages_of_boxes = _paginate_boxes(boxes, n_cols, avail_w, avail_h, max_scale)
+    total = len(pages_of_boxes)
+    svgs = []
+    for i, page_boxes in enumerate(pages_of_boxes, start=1):
+        page_title = f"{title} ({i}/{total})" if title and total > 1 else title
+        svgs.append(_render_page(page_boxes, page_title, n_cols, max_scale, box_chrome, legend))
+    return svgs
+
+
+def render_by_category(
+    items: list[dict], category_colors: dict[str, str], title: str, *, box_label: str, badge_label: str
+) -> list[str]:
+    """`box_label`/`badge_label` name what each box and each subgroup badge
+    actually groups by (e.g. "catégorie" / "amené par") — shown as a small
+    legend under the title so the badges aren't ambiguous between charts."""
     categories = sorted(category_colors)
     boxes = []
     for cat in categories:
@@ -285,21 +451,69 @@ def render_by_category(items: list[dict], category_colors: dict[str, str], title
                 "subgroups": subgroups,
             }
         )
-    return _render(boxes, title, n_cols=2 if len(boxes) >= 3 else 1)
+    legend = f"Cases = {box_label} · Étiquettes = {badge_label}"
+    return _render(boxes, title, n_cols=2 if len(boxes) >= 3 else 1, legend=legend)
 
 
-def render_by_person(items: list[dict], category_colors: dict[str, str], title: str) -> str:
+def render_by_person(
+    items: list[dict],
+    category_colors: dict[str, str],
+    title: str,
+    *,
+    box_label: str,
+    subgroup_key: str = "category",
+    badge_label: str = "catégorie",
+) -> list[str]:
+    """`box_label` names what each box groups by (e.g. "personne (amène)" or
+    "provenance"). Subgroup badges group by `subgroup_key` within each box —
+    "category" (the default) colors each badge by its category, since that's
+    inherently meaningful; any other key (e.g. "secondary", to badge by the
+    other role field such as "repris par") has no such inherent color, so it
+    falls back to a neutral badge color instead of implying a false category
+    meaning. `badge_label` names that dimension for the legend."""
     persons = sorted_names({item["person"] for item in items})
     boxes = []
     for person in persons:
         person_items = [item for item in items if item["person"] == person]
         if not person_items:
             continue
+        if subgroup_key == "category":
+            subgroups = _build_subgroups(person_items, "category", dot_color=lambda it: it["color"])
+        else:
+            # The badge already shows this dimension — repeating it as a
+            # per-item note underneath would just restate the badge text on
+            # every single chip, so drop the note on these copies.
+            deduped_items = [dict(it, note=None) for it in person_items]
+            subgroups = _build_subgroups(deduped_items, subgroup_key, dot_color=None)
         boxes.append(
             {
                 "title": person,
                 "border_color": NEUTRAL_BORDER,
-                "subgroups": _build_subgroups(person_items, "category", dot_color=lambda it: it["color"]),
+                "subgroups": subgroups,
             }
         )
-    return _render(boxes, title, n_cols=2 if len(boxes) >= 3 else 1)
+    legend = f"Cases = {box_label} · Étiquettes = {badge_label}"
+    return _render(boxes, title, n_cols=2 if len(boxes) >= 3 else 1, legend=legend)
+
+
+def render_person_sheet(person_name: str, person_items: list[dict]) -> list[str]:
+    """One person, one page, big letters — a personal checklist rather than
+    the dense all-in-one overview. Categorized, no column split (one person
+    never needs it), and allowed to scale up much further since it's the
+    only content on the page. No small top title and no outer frame — just
+    the person's name as a plain heading with category clusters below it.
+
+    If one person's items don't fit on a single page at a readable scale,
+    their categories spill onto additional pages instead of being shrunk
+    past legibility, each page's heading marked with its page number."""
+    max_scale = 3.0
+    avail_w = PAGE_W - 2 * MARGIN
+    avail_h = PAGE_H - 2 * MARGIN  # no top title bar on person sheets
+
+    box = {
+        "title": person_name,
+        "border_color": NEUTRAL_BORDER,
+        "subgroups": _build_subgroups(person_items, "category", dot_color=lambda it: it["color"]),
+    }
+    pages = _split_box_by_subgroups(box, 1, avail_w, avail_h, max_scale)
+    return [_render_page([page_box], None, n_cols=1, max_scale=max_scale, box_chrome=False) for page_box in pages]

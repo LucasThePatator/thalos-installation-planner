@@ -54,7 +54,11 @@ def build_items(rows: list[Row], person_attr: str, provenance_attr: str, categor
                 "category": row.categorie,
                 "color": category_colors[row.categorie],
                 "person": person,
-                # Only worth showing if it adds information beyond the person grouping.
+                # The other role field, always present — lets a chart badge
+                # or subgroup by it directly (e.g. "repris par" on a chart
+                # boxed by destination) instead of only by category.
+                "secondary": provenance,
+                # Only worth showing as a note if it adds information beyond the person grouping.
                 "note": provenance if provenance not in (person, NON_RENSEIGNE) else None,
             }
         )
