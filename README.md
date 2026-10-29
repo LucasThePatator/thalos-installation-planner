@@ -18,14 +18,15 @@ Produces, in `output/`:
 - `rangement_par_categorie.svg`
 - `rangement_par_personne.svg`
 - `rangement_par_destination.svg`
-- `thalos_planning.pdf` — all six charts combined, one per page
+- `thalos_planning.pdf` — all six charts combined
 - `rangement_checklists.pdf` — one big-letter checklist page per person,
   for the "rangement" (take-back) items they're responsible for
 
 Each SVG is sized to exactly one A4 page and can be printed directly from a
-browser. If a chart's content doesn't fit one page at a readable size, it
-spills onto additional same-named pages instead (`<name>_2.svg`, `_3.svg`,
-...), included alongside the first page in `thalos_planning.pdf`.
+browser. Text never prints smaller than 12pt: if a chart's content doesn't
+fit one page at that size, it spills onto additional same-named pages
+instead (`<name>_2.svg`, `_3.svg`, ...), included alongside the first page
+in `thalos_planning.pdf`.
 
 ### Options
 

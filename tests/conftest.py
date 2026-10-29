@@ -17,6 +17,8 @@ import re
 import cairosvg
 from PIL import Image
 
+from svg_render import MIN_FONT_MM
+
 PAGE_W, PAGE_H = 210.0, 297.0
 PAD_MM = 30.0
 
@@ -56,3 +58,25 @@ def assert_fits_a4(svg: str, label: str = "") -> None:
     }
     max_outside = max(region.getextrema()[1] for region in regions.values())
     assert max_outside <= 40, f"{label}: content spills outside the A4 page (max alpha outside = {max_outside})"
+
+
+def assert_min_font_size(svg: str, label: str = "") -> None:
+    """Fail if any text in `svg` prints smaller than svg_render.MIN_FONT_PT.
+
+    Text inside the page's `<g transform="...scale(s)...">` is rendered at
+    `font-size * s`, not the literal attribute value, so this scales every
+    font-size found inside that group by the page's scale factor before
+    comparing — text outside the group (e.g. the fixed-size main title) is
+    compared as-is.
+    """
+    scale_match = re.search(r'<g transform="[^"]*scale\(([\d.]+)\)', svg)
+    scale = float(scale_match.group(1)) if scale_match else 1.0
+    g_start = svg.index("<g transform")
+    g_end = svg.rindex("</g>")
+    for text, factor in ((svg[:g_start] + svg[g_end:], 1.0), (svg[g_start:g_end], scale)):
+        for raw_size in re.findall(r'font-size="([\d.]+)"', text):
+            effective = float(raw_size) * factor
+            assert effective >= MIN_FONT_MM - 1e-6, (
+                f"{label}: font-size {raw_size} at scale {factor:.3f} renders at "
+                f"{effective:.3f}mm, below the {MIN_FONT_MM:.3f}mm floor"
+            )

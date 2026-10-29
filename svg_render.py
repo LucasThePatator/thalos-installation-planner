@@ -6,32 +6,43 @@ from __future__ import annotations
 
 import colorsys
 import html
+import math
 
 from tree_builder import sorted_names
 
 PAGE_W = 210.0  # A4 portrait, millimetres
 PAGE_H = 297.0
 MARGIN = 10.0
-TITLE_H = 12.0
+TITLE_H = 14.0
 
-BOX_W_MIN = 70.0
+# A box column needs to stay at least this wide (in the unscaled layout
+# space) for the `max_scale` cap in `_solve_scale` to not itself force the
+# page below MIN_SCALE — see MIN_SCALE below. Low enough to not bind at
+# up to 3 columns; the real minimum legible width is enforced by MIN_SCALE.
+BOX_W_MIN = 40.0
 COL_GAP = 8.0
 BOX_BAR_W = 2.4
-HEADER_H = 8.0
+# Chrome (headers, badge padding, inter-subgroup/box gaps) measured at ~53%
+# of total unscaled layout height on real data — these were trimmed from
+# their original, more generous values specifically to claw pages back after
+# the chip/badge font floor below made chrome a much bigger share of each
+# page than it used to be.
+HEADER_H = 6.5
 SUB_BADGE_H = 4.6
 SUB_BADGE_GAP = 1.8
-SUB_GAP = 3.8
-SUB_BOX_PAD = 1.4
-CHIP_ROW_H = 5.0
+SUB_GAP = 2.2
+SUB_BOX_PAD = 1.0
+CHIP_ROW_H = 4.6
 CHIP_GAP_X = 4.6
-CHIP_GAP_Y = 1.5
+CHIP_GAP_Y = 1.0
 CHIP_PAD_X = 8.5
 CHIP_RIGHT_PAD = 6.0
 CHIP_FONT_SIZE = 3.3
-BADGE_FONT_SIZE = 3.0
+BADGE_FONT_SIZE = 3.3  # equal to CHIP_FONT_SIZE: the smaller of the two drives MIN_SCALE up
 TITLE_FONT_SIZE = 4.1
-BOX_BOTTOM_PAD = 3.5
-BOX_GAP = 6.0
+LEGEND_FONT_SIZE = 4.3  # unscaled text (outside the <g scale(...)>), so this is its final printed size
+BOX_BOTTOM_PAD = 2.0
+BOX_GAP = 3.5
 
 NEUTRAL_BORDER = "#a9a8a2"
 NEUTRAL_BADGE = "#8a8a86"
@@ -39,7 +50,33 @@ INK = "#0b0b0b"
 OBJECT_INK = "#0b0b0b"
 NOTE_INK = "#898781"
 
-MIN_SCALE, MAX_SCALE = 0.35, 1.5
+# Every font-size inside the `<g transform="scale(...)">` is itself multiplied
+# by that scale when rendered, so a small base font plus a small scale can
+# print well under a legible size. MIN_FONT_PT is the floor; MIN_SCALE is
+# derived from it so the smallest scaled font (chip/badge) never prints
+# smaller than MIN_FONT_PT, no matter how much content forces the scale down
+# — content that doesn't fit at that floor spills onto another page instead
+# (see _paginate_boxes / _split_box_by_subgroups).
+#
+# 12pt (the usual "readable minimum") was tried first and technically works,
+# but on the real data it blows up page count 5-6x (105 items, many with
+# long French names) and forces most names to truncate. 9pt is a deliberate
+# compromise: still clearly larger than the ~4-5pt this rendered at before
+# any floor existed, but only ~2-3x the original page count instead of 5-6x.
+MIN_FONT_PT = 9
+MIN_FONT_MM = MIN_FONT_PT * 25.4 / 72
+# Rounded up to the 4 decimal places `_render_page` prints the scale at
+# (f"scale({scale:.4f})") and padded slightly beyond that: `_render_page`'s
+# own tolerance-free checks compare the *printed* scale's effective font
+# size against the floor, so a value that rounds down at print time would
+# fail there even though the unrounded scale clears the floor.
+MIN_SCALE = math.ceil(MIN_FONT_MM / min(CHIP_FONT_SIZE, BADGE_FONT_SIZE, TITLE_FONT_SIZE) * 1e4 + 1) / 1e4
+# Kept close to MIN_SCALE rather than letting content grow toward the old
+# 1.5 ceiling: a bigger gap between MIN_SCALE and MAX_SCALE means narrower
+# columns on average, which on live data roughly doubles how many item
+# names get truncated for not much legibility gain.
+MAX_SCALE = MIN_SCALE + 0.1
+assert MAX_SCALE >= MIN_SCALE
 
 
 def _esc(text: str) -> str:
@@ -176,22 +213,63 @@ def _layout_box(box: dict, box_w: float) -> None:
     box["_h"] = last_bottom + BOX_BOTTOM_PAD
 
 
-def _split_columns(boxes: list[dict], n_cols: int) -> list[list[dict]]:
-    """Split boxes into n_cols columns, keeping original order within each
-    column, breaking as close to an even height split as possible — a
-    simple sequential masonry rather than a full bin-pack, so related boxes
-    stay easy to scan top-to-bottom instead of jumping between columns."""
-    total_h = sum(box["_h"] + BOX_GAP for box in boxes)
-    target = total_h / n_cols
-    columns: list[list[dict]] = [[] for _ in range(n_cols)]
-    col_idx = 0
+def _fits_in_n_cols(heights: list[float], n_cols: int, cap: float) -> bool:
+    """Can `heights` be split into at most `n_cols` contiguous runs, each
+    summing to at most `cap`?"""
+    count = 1
     running = 0.0
-    for box in boxes:
-        if col_idx < n_cols - 1 and running >= target and columns[col_idx]:
-            col_idx += 1
+    for h in heights:
+        if h > cap:
+            return False
+        if running + h > cap:
+            count += 1
+            running = h
+        else:
+            running += h
+    return count <= n_cols
+
+
+def _split_columns(boxes: list[dict], n_cols: int) -> list[list[dict]]:
+    """Split boxes into at most n_cols columns, keeping original order within
+    each column, minimizing the tallest column — the classic "partition an
+    array into k contiguous parts to minimize the largest part" problem,
+    solved by binary-searching the smallest feasible cap and then greedily
+    filling columns up to it.
+
+    A sequential "fill until running >= average, then move on" heuristic
+    (the previous approach) looks only at boxes already placed, never ahead,
+    so one tall box right after a short one can get stuck in the same column
+    as the short one even though its own height alone would have balanced
+    the page — in the worst case leaving a later column completely empty.
+    Binary search avoids that since it only accepts a cap once it's verified
+    the whole sequence actually fits in n_cols parts at that height."""
+    if not boxes:
+        return [[] for _ in range(n_cols)]
+    heights = [box["_h"] + BOX_GAP for box in boxes]
+    lo, hi = max(heights), sum(heights)
+    for _ in range(50):
+        if lo >= hi:
+            break
+        mid = (lo + hi) / 2
+        if _fits_in_n_cols(heights, n_cols, mid):
+            hi = mid
+        else:
+            lo = mid
+    cap = hi
+
+    columns: list[list[dict]] = []
+    current: list[dict] = []
+    running = 0.0
+    for box, h in zip(boxes, heights):
+        if current and running + h > cap:
+            columns.append(current)
+            current = []
             running = 0.0
-        columns[col_idx].append(box)
-        running += box["_h"] + BOX_GAP
+        current.append(box)
+        running += h
+    columns.append(current)
+    while len(columns) < n_cols:
+        columns.append([])
     return columns
 
 
@@ -344,7 +422,7 @@ def _render_page(boxes: list[dict], title: str | None, n_cols: int, max_scale: f
             # represent (e.g. "amené par" vs "provenance") — without it, two
             # charts with the same box/badge shapes but different grouping
             # keys are visually indistinguishable except for the main title.
-            parts.append(f'<text x="{MARGIN}" y="{MARGIN + 9.3}" font-size="3.0" fill="{NOTE_INK}">{_esc(legend)}</text>')
+            parts.append(f'<text x="{MARGIN}" y="{MARGIN + 10.5}" font-size="{LEGEND_FONT_SIZE}" fill="{NOTE_INK}">{_esc(legend)}</text>')
 
     parts.append(f'<g transform="translate({offset_x:.2f},{offset_y:.2f}) scale({scale:.4f})">')
 

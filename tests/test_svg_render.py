@@ -1,4 +1,4 @@
-from conftest import assert_fits_a4
+from conftest import assert_fits_a4, assert_min_font_size
 
 from svg_render import render_by_category, render_by_person, render_person_sheet
 
@@ -27,6 +27,7 @@ def test_normal_sized_chart_stays_one_page():
 
     assert len(pages) == 1
     assert_fits_a4(pages[0], "normal category chart")
+    assert_min_font_size(pages[0], "normal category chart")
 
 
 def test_oversized_category_paginates_across_boxes():
@@ -40,6 +41,7 @@ def test_oversized_category_paginates_across_boxes():
     assert len(pages) > 1
     for i, svg in enumerate(pages):
         assert_fits_a4(svg, f"oversized category page {i}")
+        assert_min_font_size(svg, f"oversized category page {i}")
 
 
 def test_oversized_person_paginates_across_subgroups():
@@ -63,6 +65,7 @@ def test_oversized_person_paginates_across_subgroups():
     assert len(pages) > 1
     for i, svg in enumerate(pages):
         assert_fits_a4(svg, f"oversized person-sheet page {i}")
+        assert_min_font_size(svg, f"oversized person-sheet page {i}")
 
 
 def test_multi_column_layout_fits():
@@ -77,6 +80,7 @@ def test_multi_column_layout_fits():
 
     for i, svg in enumerate(pages):
         assert_fits_a4(svg, f"multi-column page {i}")
+        assert_min_font_size(svg, f"multi-column page {i}")
 
 
 def test_single_item_with_very_long_name_does_not_overflow_its_chip():
@@ -93,6 +97,7 @@ def test_single_item_with_very_long_name_does_not_overflow_its_chip():
 
     assert len(pages) == 1
     assert_fits_a4(pages[0], "long chip name")
+    assert_min_font_size(pages[0], "long chip name")
 
 
 def test_render_by_person_fits():
@@ -103,6 +108,7 @@ def test_render_by_person_fits():
 
     for i, svg in enumerate(pages):
         assert_fits_a4(svg, f"render_by_person page {i}")
+        assert_min_font_size(svg, f"render_by_person page {i}")
 
 
 def test_render_by_person_can_badge_by_a_non_category_field():
@@ -123,3 +129,4 @@ def test_render_by_person_can_badge_by_a_non_category_field():
     assert "Alice" in pages[0]
     assert "Bob" in pages[0]
     assert_fits_a4(pages[0], "badge-by-secondary page")
+    assert_min_font_size(pages[0], "badge-by-secondary page")
