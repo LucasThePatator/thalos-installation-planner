@@ -4,10 +4,10 @@ sized to fit exactly one A4 portrait page."""
 
 from __future__ import annotations
 
-import colorsys
 import html
 import math
 
+from color_utils import hex_to_hls, hls_to_hex
 from tree_builder import sorted_names
 
 PAGE_W = 210.0  # A4 portrait, millimetres
@@ -83,35 +83,24 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=True)
 
 
-def _hex_to_hls(hex_color: str) -> tuple[float, float, float]:
-    hex_color = hex_color.lstrip("#")
-    r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (0, 2, 4))
-    return colorsys.rgb_to_hls(r, g, b)
-
-
-def _hls_to_hex(h: float, lightness: float, s: float) -> str:
-    r, g, b = colorsys.hls_to_rgb(h, lightness, s)
-    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
-
-
 def _generate_shades(base_hex: str, count: int) -> list[str]:
     """Same hue/saturation as base_hex, stepped lightness — a sequential
     single-hue ramp so sibling sub-boxes read as "the same tone, subtly
     different" rather than arbitrary unrelated colors."""
-    h, _, s = _hex_to_hls(base_hex)
+    h, _, s = hex_to_hls(base_hex)
     s = max(s, 0.35)
     if count <= 1:
-        return [_hls_to_hex(h, 0.34, s)]
+        return [hls_to_hex(h, 0.34, s)]
     lo, hi = 0.26, 0.46
-    return [_hls_to_hex(h, lo + (hi - lo) * i / (count - 1), s) for i in range(count)]
+    return [hls_to_hex(h, lo + (hi - lo) * i / (count - 1), s) for i in range(count)]
 
 
 def _readable_text_color(hex_color: str, max_l: float = 0.42) -> str:
     """Darken a hue just enough to stay legible as solid text on a near-white
     background — some categorical hues (yellow, aqua, magenta) are too light
     to read reliably otherwise."""
-    h, lightness, s = _hex_to_hls(hex_color)
-    return _hls_to_hex(h, min(lightness, max_l), s) if lightness > max_l else hex_color
+    h, lightness, s = hex_to_hls(hex_color)
+    return hls_to_hex(h, min(lightness, max_l), s) if lightness > max_l else hex_color
 
 
 def _text_width(text: str, font_size: float) -> float:

@@ -25,17 +25,20 @@ def test_sorted_names_omits_non_renseigne_when_absent():
     assert sorted_names({"Zoe", "Alice"}) == ["Alice", "Zoe"]
 
 
-def test_assign_category_colors_stable_and_wraps_past_palette_size():
-    categories = [f"Cat{i}" for i in range(len(CATEGORY_PALETTE) + 2)]
+def test_assign_category_colors_stable_and_unique_past_palette_size():
+    """Regression guard: a sheet with more categories than CATEGORY_PALETTE
+    entries used to wrap around and hand two different categories the exact
+    same color (e.g. with 9 categories and an 8-color palette, the 9th was
+    pixel-identical to the 1st) — every category must get its own color."""
+    categories = [f"Cat{i}" for i in range(2 * len(CATEGORY_PALETTE) + 2)]
     rows = [_row(categorie=c) for c in categories]
 
     colors = assign_category_colors(rows)
 
     assert len(colors) == len(categories)
     sorted_categories = sorted(categories)
-    # Palette wraps around once there are more categories than palette entries.
     assert colors[sorted_categories[0]] == CATEGORY_PALETTE[0]
-    assert colors[sorted_categories[len(CATEGORY_PALETTE)]] == CATEGORY_PALETTE[0]
+    assert len(set(colors.values())) == len(categories), "two categories got the same color"
 
 
 def test_build_items_maps_person_and_category():
