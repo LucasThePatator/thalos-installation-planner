@@ -6,6 +6,7 @@ import csv
 import io
 import urllib.error
 import urllib.request
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 
 DEFAULT_SHEET_URL = (
@@ -38,6 +39,29 @@ class Row:
 def _clean(value: str | None) -> str:
     value = (value or "").strip()
     return value or NON_RENSEIGNE
+
+
+# Columns that name a person/place and must group together regardless of how
+# it was capitalized in a given cell — "Objet" is deliberately excluded since
+# its capitalization is meaningful free text, not a repeated identifier.
+_CASE_INSENSITIVE_FIELDS = ("categorie", "provenance", "amene_par", "repris_par", "destination")
+
+
+def _canonicalize_case(values: list[str]) -> dict[str, str]:
+    """Map each case-insensitive spelling to one canonical display form — the
+    most common literal spelling, ties broken by whichever appeared first —
+    so e.g. "Groupe Castagora" / "groupe castagora" / "groupe Castagora" in
+    the sheet collapse to a single group instead of silently splitting into
+    separate badges/boxes in the generated charts."""
+    spellings_by_key: dict[str, Counter] = defaultdict(Counter)
+    first_seen: dict[str, int] = {}
+    for index, value in enumerate(values):
+        spellings_by_key[value.casefold()][value] += 1
+        first_seen.setdefault(value, index)
+    return {
+        key: max(spellings, key=lambda spelling: (spellings[spelling], -first_seen[spelling]))
+        for key, spellings in spellings_by_key.items()
+    }
 
 
 def _looks_like_html(text: str) -> bool:
@@ -84,23 +108,31 @@ def fetch_rows(source: str = DEFAULT_SHEET_URL) -> list[Row]:
             f"Colonnes trouvées : {', '.join(reader.fieldnames or []) or '(aucune)'}."
         )
 
-    rows: list[Row] = []
+    raw_rows: list[dict[str, str]] = []
     skipped = 0
     for record in reader:
         objet = (record.get("Objet") or "").strip()
         if not objet:
             skipped += 1
             continue
-        rows.append(
-            Row(
-                objet=objet,
-                categorie=_clean(record.get("Catégorie")),
-                provenance=_clean(record.get("Provenance")),
-                amene_par=_clean(record.get("Amené par")),
-                repris_par=_clean(record.get("Repris par")),
-                destination=_clean(record.get("Destination de stockage")),
-            )
+        raw_rows.append(
+            {
+                "objet": objet,
+                "categorie": _clean(record.get("Catégorie")),
+                "provenance": _clean(record.get("Provenance")),
+                "amene_par": _clean(record.get("Amené par")),
+                "repris_par": _clean(record.get("Repris par")),
+                "destination": _clean(record.get("Destination de stockage")),
+            }
         )
     if skipped:
         print(f"{skipped} ligne(s) ignorée(s) (Objet vide)")
-    return rows
+
+    canon = {field: _canonicalize_case([r[field] for r in raw_rows]) for field in _CASE_INSENSITIVE_FIELDS}
+    return [
+        Row(
+            objet=r["objet"],
+            **{field: canon[field][r[field].casefold()] for field in _CASE_INSENSITIVE_FIELDS},
+        )
+        for r in raw_rows
+    ]

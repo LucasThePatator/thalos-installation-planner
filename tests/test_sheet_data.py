@@ -44,6 +44,21 @@ def test_fetch_rows_blank_cell_becomes_non_renseigne():
     assert rows[1].destination == NON_RENSEIGNE
 
 
+def test_fetch_rows_collapses_letter_case_variants_of_the_same_name():
+    """Regression guard: "Groupe Castagora" / "groupe Castagora" /
+    "groupe castagora" in the sheet used to be treated as three different
+    people — they must collapse to one canonical spelling so charts don't
+    silently split a group into separate badges/boxes."""
+    rows = fetch_rows(str(FIXTURES / "case_variants.csv"))
+
+    assert {r.provenance for r in rows} == {"Castagora"}
+    assert {r.amene_par for r in rows} == {"Groupe Castagora"}
+    assert {r.destination for r in rows} == {"Cube"}
+    # "Groupe Castagora" (x2) and "Groupe Cube" (x1) are genuinely different
+    # people and must stay distinct.
+    assert [r.repris_par for r in rows] == ["Groupe Castagora", "Groupe Castagora", "Groupe Cube"]
+
+
 def test_fetch_rows_raises_on_missing_column():
     with pytest.raises(SheetFetchError, match="Destination de stockage"):
         fetch_rows(str(FIXTURES / "missing_column.csv"))
