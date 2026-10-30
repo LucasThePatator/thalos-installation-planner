@@ -84,7 +84,7 @@ def main() -> None:
     for filename, svg in charts.items():
         (output_dir / filename).write_text(svg, encoding="utf-8")
 
-    pdf_path = output_dir / "thalos_planning.pdf"
+    pdf_path = output_dir / "thalos_logistique.pdf"
     write_combined_pdf(charts, pdf_path)
 
     # One big-letter checklist page per "repris par" person, combined into a
